@@ -1,6 +1,6 @@
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import StreamingResponse, JSONResponse
-from PIL import Image, ImageOps, ImageEnhance
+from PIL import Image, ImageOps, ImageEnhance, ImageFilter
 import pytesseract
 import numpy as np
 import cv2
@@ -40,12 +40,27 @@ def deskew_image(pil_img: Image.Image) -> Image.Image:
     return Image.fromarray(rotated).convert("RGB")
 
 def enhance_image(image: Image.Image) -> Image.Image:
+    # 1. Grayscale
     gray = ImageOps.grayscale(image)
+
+    # 2. Resize if small
     if gray.width < 1200:
         gray = gray.resize((int(gray.width * 1.5), int(gray.height * 1.5)), Image.BICUBIC)
-    contrast = ImageEnhance.Contrast(gray).enhance(1.05)
-    sharpened = ImageEnhance.Sharpness(contrast).enhance(1.1)
-    return sharpened.convert("RGB")
+
+    # 3. Denoise (median filter)
+    denoised = gray.filter(ImageFilter.MedianFilter(size=3))
+
+    # 4. Contrast and sharpness
+    contrast = ImageEnhance.Contrast(denoised).enhance(1.3)  # Increased
+    sharp = ImageEnhance.Sharpness(contrast).enhance(2.0)    # Increased
+
+    # 5. Adaptive threshold (binarization)
+    np_img = np.array(sharp)
+    # Use Otsu's thresholding
+    _, binarized = cv2.threshold(np_img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    final = Image.fromarray(binarized).convert("RGB")
+
+    return final
 
 @app.post("/align-image")
 async def align_image(file: UploadFile = File(...)):
