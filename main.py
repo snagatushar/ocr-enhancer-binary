@@ -1,12 +1,11 @@
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import StreamingResponse, JSONResponse
-from PIL import Image, ImageOps, ImageEnhance
+from PIL import Image
 import pytesseract
 import numpy as np
 import cv2
 from io import BytesIO
 
-# Tesseract path for Docker
 pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 
 app = FastAPI()
@@ -18,7 +17,7 @@ def deskew_image(pil_img: Image.Image) -> Image.Image:
 
     coords = np.column_stack(np.where(thresh > 0))
     if coords.shape[0] == 0:
-        return pil_img  # already aligned
+        return pil_img
 
     angle = cv2.minAreaRect(coords)[-1]
     angle = -(90 + angle) if angle < -45 else -angle
@@ -33,23 +32,27 @@ def deskew_image(pil_img: Image.Image) -> Image.Image:
 
 
 def enhance_image(image: Image.Image) -> Image.Image:
-    gray = ImageOps.grayscale(image)
+    # Convert to OpenCV grayscale
+    img_cv = np.array(image.convert("L"))
 
-    # Resize only if small
-    if gray.width < 1200:
-        gray = gray.resize((int(gray.width * 1.5), int(gray.height * 1.5)), Image.BICUBIC)
+    # Resize if too small
+    if img_cv.shape[1] < 1200:
+        img_cv = cv2.resize(img_cv, None, fx=1.5, fy=1.5, interpolation=cv2.INTER_CUBIC)
 
-    # Light enhancement
-    contrast = ImageEnhance.Contrast(gray).enhance(1.05)
-    sharpened = ImageEnhance.Sharpness(contrast).enhance(1.1)
+    # Adaptive thresholding for clarity (especially faint fonts)
+    processed = cv2.adaptiveThreshold(
+        img_cv,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        11,
+        2
+    )
 
-    # Optional: Convert to black & white to help OCR faint text
-    bw = sharpened.point(lambda x: 0 if x < 180 else 255, "1")
+    # Save debug image (optional)
+    Image.fromarray(processed).save("debug_ocr_image.png")
 
-    # Save for debugging (can comment out later)
-    bw.save("debug_ocr_image.png")
-
-    return bw
+    return Image.fromarray(processed)
 
 
 @app.post("/enhance-ocr")
@@ -82,7 +85,6 @@ async def extract_text(file: UploadFile = File(...)):
         deskewed = deskew_image(image)
         enhanced = enhance_image(deskewed)
 
-        # Better OCR config for full documents
         config = "--oem 1 --psm 3"
         text = pytesseract.image_to_string(enhanced, config=config)
 
