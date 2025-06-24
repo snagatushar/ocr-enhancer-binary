@@ -1,30 +1,27 @@
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import StreamingResponse, JSONResponse
-from PIL import Image, ImageOps, ImageFilter, ImageEnhance
+from PIL import Image, ImageOps, ImageEnhance
 import pytesseract
 import numpy as np
 import cv2
 from io import BytesIO
 import re
 
-# Set Tesseract path for Render/Docker
 pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 
 app = FastAPI()
-
 
 def correct_orientation(image: Image.Image) -> Image.Image:
     try:
         osd = pytesseract.image_to_osd(image)
         rotate_angle = int(re.search(r"Rotate: (\d+)", osd).group(1))
-        print(f"[🔁] Tesseract auto-rotation: {rotate_angle}°")
+        print(f"[🔁] Auto rotation: {rotate_angle}°")
         if rotate_angle == 0:
             return image
         return image.rotate(360 - rotate_angle, expand=True)
     except Exception as e:
         print(f"[❌] Orientation detection failed: {e}")
         return image
-
 
 def deskew_image(pil_img: Image.Image) -> Image.Image:
     gray = np.array(pil_img.convert("L"))
@@ -36,14 +33,17 @@ def deskew_image(pil_img: Image.Image) -> Image.Image:
 
     angle = cv2.minAreaRect(coords)[-1]
     angle = -(90 + angle) if angle < -45 else -angle
-    print(f"[🧭] Deskewed by {angle:.2f}°")
 
-    # Rotate with expanded canvas
+    if abs(angle) < 0.5:
+        print("[ℹ️] Skipped deskew — already straight")
+        return pil_img
+
+    print(f"[🧭] Deskewing by {angle:.2f}°")
+
     (h, w) = gray.shape
     center = (w // 2, h // 2)
     M = cv2.getRotationMatrix2D(center, angle, 1.0)
 
-    # Calculate new bounds
     cos = np.abs(M[0, 0])
     sin = np.abs(M[0, 1])
     new_w = int(h * sin + w * cos)
