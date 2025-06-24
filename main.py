@@ -6,14 +6,14 @@ import numpy as np
 import cv2
 from io import BytesIO
 
-# Set Tesseract path (for Docker)
+# For Docker/Render: set tesseract path
 pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 
 app = FastAPI()
 
 
 def deskew_image(pil_img: Image.Image) -> Image.Image:
-    # Convert PIL to OpenCV grayscale
+    # Convert to grayscale (OpenCV format)
     img_cv = np.array(pil_img.convert("L"))
     _, thresh = cv2.threshold(img_cv, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
@@ -38,11 +38,17 @@ def deskew_image(pil_img: Image.Image) -> Image.Image:
 
 
 def enhance_image(image: Image.Image) -> Image.Image:
+    # Step 1: Grayscale
     gray = ImageOps.grayscale(image)
-    resized = gray.resize((gray.width * 2, gray.height * 2), Image.BICUBIC)
-    denoised = resized.filter(ImageFilter.MedianFilter(size=3))
-    contrast = ImageEnhance.Contrast(denoised).enhance(1.2)
-    sharpened = ImageEnhance.Sharpness(contrast).enhance(1.2)
+
+    # Step 2: Resize only if image is small
+    if gray.width < 1200:
+        gray = gray.resize((int(gray.width * 1.5), int(gray.height * 1.5)), Image.BICUBIC)
+
+    # Step 3: Light enhancement
+    contrast = ImageEnhance.Contrast(gray).enhance(1.05)
+    sharpened = ImageEnhance.Sharpness(contrast).enhance(1.1)
+
     return sharpened
 
 
