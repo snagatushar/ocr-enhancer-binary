@@ -18,23 +18,24 @@ def deskew_image(pil_img: Image.Image) -> Image.Image:
     if coords.shape[0] == 0:
         return pil_img
 
-    angle = cv2.minAreaRect(coords)[-1]
-    angle = -(90 + angle) if angle < -45 else -angle
+    rect = cv2.minAreaRect(coords)
+    angle = rect[-1]
 
-    if abs(angle) < 0.5:
+    # OpenCV returns angle in range [-90, 0)
+    if angle < -45:
+        angle = 90 + angle
+    else:
+        angle = angle
+
+    # Only deskew if angle is between -15 and 15 degrees
+    if abs(angle) < 0.5 or abs(angle) > 15:
         return pil_img
 
+    # Negative angle means rotate clockwise, positive means counter-clockwise
     (h, w) = gray.shape
     center = (w // 2, h // 2)
     M = cv2.getRotationMatrix2D(center, angle, 1.0)
-    cos = np.abs(M[0, 0])
-    sin = np.abs(M[0, 1])
-    new_w = int(h * sin + w * cos)
-    new_h = int(h * cos + w * sin)
-    M[0, 2] += (new_w / 2) - center[0]
-    M[1, 2] += (new_h / 2) - center[1]
-
-    rotated = cv2.warpAffine(np.array(pil_img), M, (new_w, new_h),
+    rotated = cv2.warpAffine(np.array(pil_img), M, (w, h),
                              flags=cv2.INTER_CUBIC, borderValue=(255, 255, 255))
     return Image.fromarray(rotated).convert("RGB")
 
