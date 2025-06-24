@@ -11,6 +11,7 @@ pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 
 app = FastAPI()
 
+
 def correct_orientation(image: Image.Image) -> Image.Image:
     try:
         osd = pytesseract.image_to_osd(image)
@@ -22,6 +23,7 @@ def correct_orientation(image: Image.Image) -> Image.Image:
     except Exception as e:
         print(f"[❌] Orientation detection failed: {e}")
         return image
+
 
 def deskew_image(pil_img: Image.Image) -> Image.Image:
     gray = np.array(pil_img.convert("L"))
@@ -35,10 +37,10 @@ def deskew_image(pil_img: Image.Image) -> Image.Image:
     angle = -(90 + angle) if angle < -45 else -angle
 
     if abs(angle) < 0.5:
-        print("[ℹ️] Skipped deskew — already straight")
+        print("[ℹ️] Already straight, skipping deskew")
         return pil_img
 
-    print(f"[🧭] Deskewing by {angle:.2f}°")
+    print(f"[🧭] Deskew angle: {angle:.2f}°")
 
     (h, w) = gray.shape
     center = (w // 2, h // 2)
@@ -66,6 +68,30 @@ def enhance_image(image: Image.Image) -> Image.Image:
     sharpened = ImageEnhance.Sharpness(contrast).enhance(1.1)
 
     return sharpened
+
+
+@app.post("/align-image")
+async def align_image(file: UploadFile = File(...)):
+    """
+    Accepts an image, auto-rotates and deskews it, returns the aligned image.
+    """
+    try:
+        image_data = await file.read()
+        image = Image.open(BytesIO(image_data)).convert("RGB")
+
+        oriented = correct_orientation(image)
+        aligned = deskew_image(oriented)
+
+        img_bytes = BytesIO()
+        aligned.save(img_bytes, format="PNG")
+        img_bytes.seek(0)
+
+        return StreamingResponse(img_bytes, media_type="image/png", headers={
+            "Content-Disposition": "inline; filename=aligned_image.png"
+        })
+
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
 @app.post("/enhance-ocr")
