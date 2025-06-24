@@ -1,4 +1,4 @@
-]from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import StreamingResponse, JSONResponse
 from PIL import Image, ImageOps, ImageFilter, ImageEnhance
 import pytesseract
