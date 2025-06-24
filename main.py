@@ -5,6 +5,7 @@ import pytesseract
 import numpy as np
 import cv2
 from io import BytesIO
+import base64
 
 pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 
@@ -84,20 +85,38 @@ async def align_image(file: UploadFile = File(...)):
 @app.post("/enhance-ocr")
 async def enhance_ocr(file: UploadFile = File(...)):
     try:
+        # --- Step 1: Load binary image from request ---
         image_data = await file.read()
         image = Image.open(BytesIO(image_data)).convert("RGB")
-        image = ImageOps.exif_transpose(image)
 
-        aligned = deskew_image(image)
-        enhanced = enhance_image(aligned)
+        # --- Step 2: Grayscale ---
+        gray = ImageOps.grayscale(image)
 
+        # --- Step 3: Resize (upscale) ---
+        upscaled = gray.resize((gray.width * 2, gray.height * 2), Image.BICUBIC)
+
+        # --- Step 4: Median Filter (Denoise) ---
+        denoised = upscaled.filter(ImageFilter.MedianFilter(size=3))
+
+        # --- Step 5: Enhance Contrast ---
+        contrast = ImageEnhance.Contrast(denoised).enhance(2.0)
+
+        # --- Step 6: Enhance Sharpness ---
+        sharpened = ImageEnhance.Sharpness(contrast).enhance(2.0)
+
+        # --- Step 7: OCR using Tesseract ---
+        text = pytesseract.image_to_string(sharpened, config='--psm 6')
+
+        # --- Step 8: Convert final image to binary (base64) ---
         img_bytes = BytesIO()
-        enhanced.save(img_bytes, format="PNG")
-        img_bytes.seek(0)
+        sharpened.save(img_bytes, format='PNG')
+        img_base64 = base64.b64encode(img_bytes.getvalue()).decode()
 
-        return StreamingResponse(img_bytes, media_type="image/png", headers={
-            "Content-Disposition": "inline; filename=enhanced_output.png"
-        })
+        return {
+            "text": text,
+            "enhanced_image_base64": img_base64
+        }
+
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
