@@ -16,10 +16,16 @@ def correct_orientation(image: Image.Image) -> Image.Image:
     try:
         osd = pytesseract.image_to_osd(image)
         rotate_angle = int(re.search(r"Rotate: (\d+)", osd).group(1))
-        print(f"[🔁] Auto rotation: {rotate_angle}°")
-        if rotate_angle == 0:
+        orientation_conf = int(re.search(r"Orientation confidence: (\d+)", osd).group(1))
+
+        print(f"[🔁] Detected rotation: {rotate_angle}° | Confidence: {orientation_conf}")
+
+        if orientation_conf < 10 or rotate_angle == 0:
+            print("[ℹ️] Rotation skipped — low confidence or already straight.")
             return image
+
         return image.rotate(360 - rotate_angle, expand=True)
+
     except Exception as e:
         print(f"[❌] Orientation detection failed: {e}")
         return image
@@ -70,30 +76,6 @@ def enhance_image(image: Image.Image) -> Image.Image:
     return sharpened
 
 
-@app.post("/align-image")
-async def align_image(file: UploadFile = File(...)):
-    """
-    Accepts an image, auto-rotates and deskews it, returns the aligned image.
-    """
-    try:
-        image_data = await file.read()
-        image = Image.open(BytesIO(image_data)).convert("RGB")
-
-        oriented = correct_orientation(image)
-        aligned = deskew_image(oriented)
-
-        img_bytes = BytesIO()
-        aligned.save(img_bytes, format="PNG")
-        img_bytes.seek(0)
-
-        return StreamingResponse(img_bytes, media_type="image/png", headers={
-            "Content-Disposition": "inline; filename=aligned_image.png"
-        })
-
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
-
-
 @app.post("/enhance-ocr")
 async def enhance_ocr(file: UploadFile = File(...)):
     try:
@@ -128,6 +110,27 @@ async def extract_text(file: UploadFile = File(...)):
 
         text = pytesseract.image_to_string(enhanced, config="--psm 6")
         return {"text": text.strip()}
+
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@app.post("/align-image")
+async def align_image(file: UploadFile = File(...)):
+    try:
+        image_data = await file.read()
+        image = Image.open(BytesIO(image_data)).convert("RGB")
+
+        oriented = correct_orientation(image)
+        aligned = deskew_image(oriented)
+
+        img_bytes = BytesIO()
+        aligned.save(img_bytes, format="PNG")
+        img_bytes.seek(0)
+
+        return StreamingResponse(img_bytes, media_type="image/png", headers={
+            "Content-Disposition": "inline; filename=aligned_image.png"
+        })
 
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
