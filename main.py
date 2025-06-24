@@ -10,23 +10,25 @@ pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 
 app = FastAPI()
 
-# 🧭 Deskew image using OpenCV
+# 🧭 Deskew only if needed (>0.5 degrees)
 def deskew_image(pil_img: Image.Image) -> Image.Image:
     gray = np.array(pil_img.convert("L"))
     _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
     coords = np.column_stack(np.where(thresh > 0))
     if coords.shape[0] == 0:
+        print("[ℹ️] No text detected, skipping deskew.")
         return pil_img
 
     angle = cv2.minAreaRect(coords)[-1]
     angle = -(90 + angle) if angle < -45 else -angle
 
     if abs(angle) < 0.5:
-        print("[ℹ️] Skipping deskew — image already straight")
+        print(f"[✅] Angle {angle:.2f}° is too small — skipping deskew")
         return pil_img
 
-    print(f"[🧭] Deskew angle: {angle:.2f}°")
+    print(f"[🧭] Deskewing by {angle:.2f}°")
+
     (h, w) = gray.shape
     center = (w // 2, h // 2)
     M = cv2.getRotationMatrix2D(center, angle, 1.0)
@@ -41,12 +43,12 @@ def deskew_image(pil_img: Image.Image) -> Image.Image:
 
     rotated = cv2.warpAffine(np.array(pil_img), M, (new_w, new_h),
                              flags=cv2.INTER_CUBIC, borderValue=(255, 255, 255))
+
     return Image.fromarray(rotated)
 
-# 🎨 Enhance image with Pillow
+# 🎨 Enhance (resize, contrast, sharpness)
 def enhance_image(image: Image.Image) -> Image.Image:
     gray = ImageOps.grayscale(image)
-
     if gray.width < 1200:
         gray = gray.resize((int(gray.width * 1.5), int(gray.height * 1.5)), Image.BICUBIC)
 
@@ -54,7 +56,7 @@ def enhance_image(image: Image.Image) -> Image.Image:
     sharpened = ImageEnhance.Sharpness(contrast).enhance(1.1)
     return sharpened
 
-# 📤 /align-image Endpoint
+# 📤 /align-image — returns deskewed image (no enhancement, no OCR)
 @app.post("/align-image")
 async def align_image(file: UploadFile = File(...)):
     try:
@@ -70,11 +72,10 @@ async def align_image(file: UploadFile = File(...)):
         return StreamingResponse(img_bytes, media_type="image/png", headers={
             "Content-Disposition": "inline; filename=aligned_image.png"
         })
-
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
-# 📤 /enhance-ocr Endpoint
+# 📤 /enhance-ocr — returns enhanced binary image (for viewing or OCR)
 @app.post("/enhance-ocr")
 async def enhance_ocr(file: UploadFile = File(...)):
     try:
@@ -91,11 +92,10 @@ async def enhance_ocr(file: UploadFile = File(...)):
         return StreamingResponse(img_bytes, media_type="image/png", headers={
             "Content-Disposition": "inline; filename=enhanced_output.png"
         })
-
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
-# 📤 /extract-text Endpoint
+# 📤 /extract-text — returns extracted text only
 @app.post("/extract-text")
 async def extract_text(file: UploadFile = File(...)):
     try:
@@ -106,8 +106,6 @@ async def extract_text(file: UploadFile = File(...)):
         enhanced = enhance_image(aligned)
 
         text = pytesseract.image_to_string(enhanced, config="--psm 6")
-
         return {"text": text.strip()}
-
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
