@@ -5,52 +5,61 @@ import pytesseract
 import numpy as np
 import cv2
 from io import BytesIO
-import os
 import re
 
 pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 
 app = FastAPI()
 
-def smart_deskew(pil_img: Image.Image, angle_threshold: float = 2.0) -> Image.Image:
-    print("[🔍] Trying Hough Transform first...")
-    gray = np.array(pil_img.convert("L"))
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    edges = cv2.Canny(blurred, 50, 150, apertureSize=3)
 
-    lines = cv2.HoughLines(edges, 1, np.pi / 180, 200)
-
-    if lines is not None:
-        angles = [np.rad2deg(theta) - 90 for rho, theta in lines[:, 0]]
-        median_angle = np.median(angles)
-
-        if abs(median_angle) > angle_threshold:
-            print(f"[🧭] Hough deskew angle: {-median_angle:.2f}°")
-            (h, w) = gray.shape
-            M = cv2.getRotationMatrix2D((w // 2, h // 2), -median_angle, 1.0)
-            rotated = cv2.warpAffine(np.array(pil_img), M, (w, h), flags=cv2.INTER_CUBIC, borderValue=(255, 255, 255))
-            return Image.fromarray(rotated)
-        else:
-            print(f"[✅] Hough angle {median_angle:.2f}° within threshold. No rotation.")
-            return pil_img
-
-    print("[⚠️] Hough failed. Falling back to Tesseract OSD...")
+def correct_orientation(image: Image.Image) -> Image.Image:
     try:
-        osd = pytesseract.image_to_osd(pil_img)
+        osd = pytesseract.image_to_osd(image)
         rotate_angle = int(re.search(r"Rotate: (\d+)", osd).group(1))
-        print(f"[🔁] Tesseract OSD angle: {rotate_angle}°")
-        if rotate_angle != 0:
-            return pil_img.rotate(360 - rotate_angle, expand=True)
+        print(f"[🔁] Auto rotation: {rotate_angle}°")
+        if rotate_angle == 0:
+            return image
+        return image.rotate(360 - rotate_angle, expand=True)
     except Exception as e:
-        print(f"[❌] Tesseract OSD failed: {e}")
+        print(f"[❌] Orientation detection failed: {e}")
+        return image
 
-    return pil_img
+
+def deskew_image(pil_img: Image.Image) -> Image.Image:
+    gray = np.array(pil_img.convert("L"))
+    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+    coords = np.column_stack(np.where(thresh > 0))
+    if coords.shape[0] == 0:
+        return pil_img
+
+    angle = cv2.minAreaRect(coords)[-1]
+    angle = -(90 + angle) if angle < -45 else -angle
+
+    if abs(angle) < 0.5:
+        print("[ℹ️] Already straight, skipping deskew")
+        return pil_img
+
+    print(f"[🧭] Deskew angle: {angle:.2f}°")
+
+    (h, w) = gray.shape
+    center = (w // 2, h // 2)
+    M = cv2.getRotationMatrix2D(center, angle, 1.0)
+
+    cos = np.abs(M[0, 0])
+    sin = np.abs(M[0, 1])
+    new_w = int(h * sin + w * cos)
+    new_h = int(h * cos + w * sin)
+
+    M[0, 2] += (new_w / 2) - center[0]
+    M[1, 2] += (new_h / 2) - center[1]
+
+    rotated = cv2.warpAffine(np.array(pil_img), M, (new_w, new_h), flags=cv2.INTER_CUBIC, borderValue=(255, 255, 255))
+    return Image.fromarray(rotated)
 
 
 def enhance_image(image: Image.Image) -> Image.Image:
-    print("[✨] Enhancing image with Pillow...")
-
-    # Rotate right side two times = 180° total clockwise
+    # Rotate right side 2 times = 180° clockwise
     image = image.rotate(-180, expand=True)
 
     gray = ImageOps.grayscale(image)
@@ -60,6 +69,7 @@ def enhance_image(image: Image.Image) -> Image.Image:
 
     contrast = ImageEnhance.Contrast(gray).enhance(1.05)
     sharpened = ImageEnhance.Sharpness(contrast).enhance(1.1)
+
     return sharpened
 
 
@@ -69,7 +79,8 @@ async def align_image(file: UploadFile = File(...)):
         image_data = await file.read()
         image = Image.open(BytesIO(image_data)).convert("RGB")
 
-        aligned = smart_deskew(image)
+        oriented = correct_orientation(image)
+        aligned = deskew_image(oriented)
 
         img_bytes = BytesIO()
         aligned.save(img_bytes, format="PNG")
@@ -78,6 +89,7 @@ async def align_image(file: UploadFile = File(...)):
         return StreamingResponse(img_bytes, media_type="image/png", headers={
             "Content-Disposition": "inline; filename=aligned_image.png"
         })
+
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
@@ -88,8 +100,9 @@ async def enhance_ocr(file: UploadFile = File(...)):
         image_data = await file.read()
         image = Image.open(BytesIO(image_data)).convert("RGB")
 
-        aligned = smart_deskew(image)
-        enhanced = enhance_image(aligned)
+        oriented = correct_orientation(image)
+        deskewed = deskew_image(oriented)
+        enhanced = enhance_image(deskewed)
 
         img_bytes = BytesIO()
         enhanced.save(img_bytes, format="PNG")
@@ -98,6 +111,7 @@ async def enhance_ocr(file: UploadFile = File(...)):
         return StreamingResponse(img_bytes, media_type="image/png", headers={
             "Content-Disposition": "inline; filename=enhanced_output.png"
         })
+
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
@@ -108,15 +122,12 @@ async def extract_text(file: UploadFile = File(...)):
         image_data = await file.read()
         image = Image.open(BytesIO(image_data)).convert("RGB")
 
-        aligned = smart_deskew(image)
-        enhanced = enhance_image(aligned)
+        oriented = correct_orientation(image)
+        deskewed = deskew_image(oriented)
+        enhanced = enhance_image(deskewed)
 
         text = pytesseract.image_to_string(enhanced, config="--psm 6")
         return {"text": text.strip()}
+
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
-
-
-@app.get("/")
-def health_check():
-    return {"status": "ok"}
