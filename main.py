@@ -48,7 +48,11 @@ def smart_deskew(pil_img: Image.Image, angle_threshold: float = 2.0) -> Image.Im
 
 
 def enhance_image(image: Image.Image) -> Image.Image:
-    print("[✨] Enhancing image: contrast & sharpness")
+    print("[✨] Enhancing image with Pillow...")
+
+    # Rotate right side two times = 180° total clockwise
+    image = image.rotate(-180, expand=True)
+
     gray = ImageOps.grayscale(image)
 
     if gray.width < 1200:
