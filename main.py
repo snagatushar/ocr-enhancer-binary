@@ -3,96 +3,66 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from PIL import Image, ImageOps, ImageEnhance
 import pytesseract
 import numpy as np
+import cv2
 from io import BytesIO
 
 pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 
 app = FastAPI()
 
-# Rotation disabled
-def correct_orientation(image: Image.Image) -> Image.Image:
-    print("[🚫] Auto-rotation skipped.")
-    return image  # No rotation applied
 
-# Deskew logic removed
-def deskew_image(pil_img: Image.Image) -> Image.Image:
-    print("[🚫] Deskew skipped.")
-    return pil_img  # No deskewing
+def smart_deskew(pil_img: Image.Image, angle_threshold: float = 2.0) -> Image.Image:
+    gray = np.array(pil_img.convert("L"))
+    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
-# Only enhancement logic remains
-def enhance_image(image: Image.Image) -> Image.Image:
-    print("[✨] Applying enhancement...")
-    gray = ImageOps.grayscale(image)
+    coords = np.column_stack(np.where(thresh > 0))
+    if coords.shape[0] == 0:
+        print("[ℹ️] No foreground pixels found, skipping deskew.")
+        return pil_img
 
-    if gray.width < 1200:
-        gray = gray.resize((int(gray.width * 1.5), int(gray.height * 1.5)), Image.BICUBIC)
+    angle = cv2.minAreaRect(coords)[-1]
+    angle = -(90 + angle) if angle < -45 else -angle
 
-    contrast = ImageEnhance.Contrast(gray).enhance(1.05)
-    sharpened = ImageEnhance.Sharpness(contrast).enhance(1.1)
+    if abs(angle) <= angle_threshold:
+        print(f"[✅] Angle {angle:.2f}° is within threshold ({angle_threshold}°), skipping deskew.")
+        return pil_img
 
-    return sharpened
+    print(f"[🧭] Deskewing... angle detected: {angle:.2f}°")
+
+    (h, w) = gray.shape
+    center = (w // 2, h // 2)
+    M = cv2.getRotationMatrix2D(center, angle, 1.0)
+
+    cos = np.abs(M[0, 0])
+    sin = np.abs(M[0, 1])
+    new_w = int(h * sin + w * cos)
+    new_h = int(h * cos + w * sin)
+
+    M[0, 2] += (new_w / 2) - center[0]
+    M[1, 2] += (new_h / 2) - center[1]
+
+    rotated = cv2.warpAffine(np.array(pil_img), M, (new_w, new_h), flags=cv2.INTER_CUBIC, borderValue=(255, 255, 255))
+    return Image.fromarray(rotated)
 
 
 @app.post("/align-image")
 async def align_image(file: UploadFile = File(...)):
     """
-    Returns the original image without alignment.
+    Aligns image only if skew angle is more than 2 degrees.
     """
     try:
         image_data = await file.read()
         image = Image.open(BytesIO(image_data)).convert("RGB")
 
-        # Skip all corrections
-        final_image = image
+        aligned = smart_deskew(image, angle_threshold=2.0)
 
         img_bytes = BytesIO()
-        final_image.save(img_bytes, format="PNG")
+        aligned.save(img_bytes, format="PNG")
         img_bytes.seek(0)
 
         return StreamingResponse(img_bytes, media_type="image/png", headers={
             "Content-Disposition": "inline; filename=aligned_image.png"
         })
-
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
-
-
-@app.post("/enhance-ocr")
-async def enhance_ocr(file: UploadFile = File(...)):
-    """
-    Returns enhanced image (no rotation or deskew).
-    """
-    try:
-        image_data = await file.read()
-        image = Image.open(BytesIO(image_data)).convert("RGB")
-
-        enhanced = enhance_image(image)
-
-        img_bytes = BytesIO()
-        enhanced.save(img_bytes, format="PNG")
-        img_bytes.seek(0)
-
-        return StreamingResponse(img_bytes, media_type="image/png", headers={
-            "Content-Disposition": "inline; filename=enhanced_output.png"
-        })
-
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
-
-
-@app.post("/extract-text")
-async def extract_text(file: UploadFile = File(...)):
-    """
-    Extracts text from enhanced image (no rotation or deskew).
-    """
-    try:
-        image_data = await file.read()
-        image = Image.open(BytesIO(image_data)).convert("RGB")
-
-        enhanced = enhance_image(image)
-
-        text = pytesseract.image_to_string(enhanced, config="--psm 6")
-        return {"text": text.strip()}
 
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
