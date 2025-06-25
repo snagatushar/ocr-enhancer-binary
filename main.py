@@ -1,29 +1,25 @@
-
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import StreamingResponse, JSONResponse
-from PIL import Image, ImageOps, ImageEnhance
+from PIL import Image, ImageEnhance, ImageOps
 import pytesseract
 import numpy as np
 import cv2
-from io import BytesIO
-import re
+import io
 
 pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 
 app = FastAPI()
 
 
-def correct_orientation(image: Image.Image) -> Image.Image:
-    try:
-        osd = pytesseract.image_to_osd(image)
-        rotate_angle = int(re.search(r"Rotate: (\d+)", osd).group(1))
-        print(f"[🔁] Auto rotation: {rotate_angle}°")
-        if rotate_angle == 0:
-            return image
-        return image.rotate(360 - rotate_angle, expand=True)
-    except Exception as e:
-        print(f"[❌] Orientation detection failed: {e}")
-        return image
+def load_image_from_bytes(image_bytes):
+    return Image.open(io.BytesIO(image_bytes))
+
+
+def crop_image(pil_img: Image.Image) -> Image.Image:
+    # You can change this box (left, upper, right, lower)
+    width, height = pil_img.size
+    box = (0, 0, width, height)  # No-op by default
+    return pil_img.crop(box)
 
 
 def deskew_image(pil_img: Image.Image) -> Image.Image:
@@ -38,10 +34,7 @@ def deskew_image(pil_img: Image.Image) -> Image.Image:
     angle = -(90 + angle) if angle < -45 else -angle
 
     if abs(angle) < 0.5:
-        print("[ℹ️] Already straight, skipping deskew")
         return pil_img
-
-    print(f"[🧭] Deskew angle: {angle:.2f}°")
 
     (h, w) = gray.shape
     center = (w // 2, h // 2)
@@ -71,65 +64,43 @@ def enhance_image(image: Image.Image) -> Image.Image:
     return sharpened
 
 
-@app.post("/align-image")
-async def align_image(file: UploadFile = File(...)):
-    """
-    Accepts an image, auto-rotates and deskews it, returns the aligned image.
-    """
+def run_ocr(image: Image.Image) -> str:
+    config = "--oem 3 --psm 6 -c preserve_interword_spaces=1"
+    return pytesseract.image_to_string(image, config=config)
+
+
+@app.post("/ocr")
+async def full_pipeline(file: UploadFile = File(...)):
     try:
         image_data = await file.read()
-        image = Image.open(BytesIO(image_data)).convert("RGB")
+        image = load_image_from_bytes(image_data)
 
-        oriented = correct_orientation(image)
-        aligned = deskew_image(oriented)
+        cropped = crop_image(image)
+        aligned = deskew_image(cropped)
+        enhanced = enhance_image(aligned)
+        text = run_ocr(enhanced)
 
-        img_bytes = BytesIO()
-        aligned.save(img_bytes, format="PNG")
-        img_bytes.seek(0)
-
-        return StreamingResponse(img_bytes, media_type="image/png", headers={
-            "Content-Disposition": "inline; filename=aligned_image.png"
-        })
-
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
-
-
-@app.post("/enhance-ocr")
-async def enhance_ocr(file: UploadFile = File(...)):
-    try:
-        image_data = await file.read()
-        image = Image.open(BytesIO(image_data)).convert("RGB")
-
-        oriented = correct_orientation(image)
-        deskewed = deskew_image(oriented)
-        enhanced = enhance_image(deskewed)
-
-        img_bytes = BytesIO()
-        enhanced.save(img_bytes, format="PNG")
-        img_bytes.seek(0)
-
-        return StreamingResponse(img_bytes, media_type="image/png", headers={
-            "Content-Disposition": "inline; filename=enhanced_output.png"
-        })
-
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
-
-
-@app.post("/extract-text")
-async def extract_text(file: UploadFile = File(...)):
-    try:
-        image_data = await file.read()
-        image = Image.open(BytesIO(image_data)).convert("RGB")
-
-        oriented = correct_orientation(image)
-        deskewed = deskew_image(oriented)
-        enhanced = enhance_image(deskewed)
-
-        text = pytesseract.image_to_string(enhanced, config="--psm 6")
         return {"text": text.strip()}
 
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
+
+@app.post("/processed-image")
+async def processed_image(file: UploadFile = File(...)):
+    try:
+        image_data = await file.read()
+        image = load_image_from_bytes(image_data)
+
+        cropped = crop_image(image)
+        aligned = deskew_image(cropped)
+        enhanced = enhance_image(aligned)
+
+        buffer = io.BytesIO()
+        enhanced.save(buffer, format="PNG")
+        buffer.seek(0)
+
+        return StreamingResponse(buffer, media_type="image/png")
+
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
