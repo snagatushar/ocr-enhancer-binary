@@ -11,38 +11,36 @@ pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 
 app = FastAPI()
 
-
 def smart_deskew(pil_img: Image.Image, angle_threshold: float = 2.0) -> Image.Image:
+    print("[🔍] Deskewing with Hough Transform...")
+
     gray = np.array(pil_img.convert("L"))
-    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges = cv2.Canny(blurred, 50, 150, apertureSize=3)
 
-    coords = np.column_stack(np.where(thresh > 0))
-    if coords.shape[0] == 0:
-        print("[ℹ️] No text found, skip deskew.")
+    lines = cv2.HoughLines(edges, 1, np.pi / 180, 200)
+    if lines is None:
+        print("[ℹ️] No lines detected. Skipping deskew.")
         return pil_img
 
-    angle = cv2.minAreaRect(coords)[-1]
-    angle = -(90 + angle) if angle < -45 else -angle
+    angles = []
+    for rho, theta in lines[:, 0]:
+        angle = np.rad2deg(theta) - 90
+        angles.append(angle)
 
-    if abs(angle) <= angle_threshold:
-        print(f"[✅] Angle {angle:.2f}° is small. Skipping deskew.")
+    median_angle = np.median(angles)
+
+    if abs(median_angle) <= angle_threshold:
+        print(f"[✅] Median angle {median_angle:.2f}° within threshold. Skipping rotation.")
         return pil_img
 
-    print(f"[🧭] Deskewing... angle = {angle:.2f}°")
+    print(f"[🧭] Deskewing... Rotating by {-median_angle:.2f}°")
 
     (h, w) = gray.shape
     center = (w // 2, h // 2)
-    M = cv2.getRotationMatrix2D(center, angle, 1.0)
+    M = cv2.getRotationMatrix2D(center, -median_angle, 1.0)
 
-    cos = np.abs(M[0, 0])
-    sin = np.abs(M[0, 1])
-    new_w = int(h * sin + w * cos)
-    new_h = int(h * cos + w * sin)
-
-    M[0, 2] += (new_w / 2) - center[0]
-    M[1, 2] += (new_h / 2) - center[1]
-
-    rotated = cv2.warpAffine(np.array(pil_img), M, (new_w, new_h), flags=cv2.INTER_CUBIC, borderValue=(255, 255, 255))
+    rotated = cv2.warpAffine(np.array(pil_img), M, (w, h), flags=cv2.INTER_CUBIC, borderValue=(255, 255, 255))
     return Image.fromarray(rotated)
 
 
@@ -65,7 +63,7 @@ async def align_image(file: UploadFile = File(...)):
         image_data = await file.read()
         image = Image.open(BytesIO(image_data)).convert("RGB")
 
-        aligned = smart_deskew(image)  # ✅ Rotate only once if needed
+        aligned = smart_deskew(image)
 
         img_bytes = BytesIO()
         aligned.save(img_bytes, format="PNG")
@@ -86,7 +84,7 @@ async def enhance_ocr(file: UploadFile = File(...)):
         image = Image.open(BytesIO(image_data)).convert("RGB")
 
         aligned = smart_deskew(image)
-        enhanced = enhance_image(aligned)  # ✅ No extra rotation here
+        enhanced = enhance_image(aligned)
 
         img_bytes = BytesIO()
         enhanced.save(img_bytes, format="PNG")
@@ -114,3 +112,8 @@ async def extract_text(file: UploadFile = File(...)):
 
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@app.get("/")
+def health_check():
+    return {"status": "ok"}
