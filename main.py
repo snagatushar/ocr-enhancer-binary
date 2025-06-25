@@ -59,7 +59,7 @@ def deskew_image(pil_img: Image.Image) -> Image.Image:
 
 
 def enhance_image(image: Image.Image) -> Image.Image:
-    # Rotate right side 2 times = 180° clockwise
+    # Optional: Rotate right side 2 times (180° clockwise)
     image = image.rotate(-180, expand=True)
 
     gray = ImageOps.grayscale(image)
@@ -71,6 +71,20 @@ def enhance_image(image: Image.Image) -> Image.Image:
     sharpened = ImageEnhance.Sharpness(contrast).enhance(1.1)
 
     return sharpened
+
+
+def preprocess_for_ocr(image: Image.Image) -> np.ndarray:
+    """Convert PIL to OpenCV format and apply adaptive thresholding."""
+    img_np = np.array(image.convert("RGB"))
+    gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+
+    processed = cv2.adaptiveThreshold(
+        gray, 255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        11, 2
+    )
+    return processed
 
 
 @app.post("/align-image")
@@ -126,7 +140,13 @@ async def extract_text(file: UploadFile = File(...)):
         deskewed = deskew_image(oriented)
         enhanced = enhance_image(deskewed)
 
-        text = pytesseract.image_to_string(enhanced, config="--psm 6")
+        preprocessed = preprocess_for_ocr(enhanced)
+
+        text = pytesseract.image_to_string(
+            preprocessed,
+            lang='eng',
+            config="--psm 6 --oem 3 -c preserve_interword_spaces=1"
+        )
         return {"text": text.strip()}
 
     except Exception as e:
