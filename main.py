@@ -5,6 +5,7 @@ import pytesseract
 import numpy as np
 import cv2
 from io import BytesIO
+import os
 
 pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 
@@ -45,16 +46,26 @@ def smart_deskew(pil_img: Image.Image, angle_threshold: float = 2.0) -> Image.Im
     return Image.fromarray(rotated)
 
 
+def enhance_image(image: Image.Image) -> Image.Image:
+    print("[✨] Enhancing image...")
+    gray = ImageOps.grayscale(image)
+
+    if gray.width < 1200:
+        gray = gray.resize((int(gray.width * 1.5), int(gray.height * 1.5)), Image.BICUBIC)
+
+    contrast = ImageEnhance.Contrast(gray).enhance(1.05)
+    sharpened = ImageEnhance.Sharpness(contrast).enhance(1.1)
+
+    return sharpened
+
+
 @app.post("/align-image")
 async def align_image(file: UploadFile = File(...)):
-    """
-    Aligns image only if skew angle is more than 2 degrees.
-    """
     try:
         image_data = await file.read()
         image = Image.open(BytesIO(image_data)).convert("RGB")
 
-        aligned = smart_deskew(image, angle_threshold=2.0)
+        aligned = smart_deskew(image)
 
         img_bytes = BytesIO()
         aligned.save(img_bytes, format="PNG")
@@ -66,3 +77,45 @@ async def align_image(file: UploadFile = File(...)):
 
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@app.post("/enhance-ocr")
+async def enhance_ocr(file: UploadFile = File(...)):
+    try:
+        image_data = await file.read()
+        image = Image.open(BytesIO(image_data)).convert("RGB")
+
+        aligned = smart_deskew(image)
+        enhanced = enhance_image(aligned)
+
+        img_bytes = BytesIO()
+        enhanced.save(img_bytes, format="PNG")
+        img_bytes.seek(0)
+
+        return StreamingResponse(img_bytes, media_type="image/png", headers={
+            "Content-Disposition": "inline; filename=enhanced_output.png"
+        })
+
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@app.post("/extract-text")
+async def extract_text(file: UploadFile = File(...)):
+    try:
+        image_data = await file.read()
+        image = Image.open(BytesIO(image_data)).convert("RGB")
+
+        aligned = smart_deskew(image)
+        enhanced = enhance_image(aligned)
+
+        text = pytesseract.image_to_string(enhanced, config="--psm 6")
+        return {"text": text.strip()}
+
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@app.get("/")
+def health_check():
+    return {"status": "ok"}
